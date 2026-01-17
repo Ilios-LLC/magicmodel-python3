@@ -16,14 +16,14 @@ A Python DynamoDB ORM inspired by [magicmodel-go](https://github.com/Ilios-LLC/m
 
 ```bash
 # Install from GitHub
-pip install git+https://github.com/YOUR_USERNAME/magicmodel-python.git
+pip install git+https://github.com/Ilios-LLC/magicmodel-python3.git
 
 # Or with uv
-uv add git+https://github.com/YOUR_USERNAME/magicmodel-python.git
+uv add git+https://github.com/Ilios-LLC/magicmodel-python3.git
 
 # Install from local clone
-git clone https://github.com/YOUR_USERNAME/magicmodel-python.git
-cd magicmodel-python
+git clone https://github.com/Ilios-LLC/magicmodel-python3.git
+cd magicmodel-python3
 pip install .
 
 # Or install in editable mode for development
