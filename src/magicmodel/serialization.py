@@ -72,6 +72,10 @@ class Serializer:
                 return {"BS": list(value)}
             else:
                 return {"L": [self.serialize_value(v) for v in value]}
+        elif isinstance(value, BaseModel):
+            # Handle nested Pydantic models
+            data = value.model_dump(by_alias=True)
+            return {"M": {k: self.serialize_value(v) for k, v in data.items()}}
 
         # Fallback: serialize as string
         return {"S": str(value)}
