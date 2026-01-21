@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -42,6 +43,9 @@ class Serializer:
         """
         if value is None:
             return {"NULL": True}
+        elif isinstance(value, Enum):
+            # Check Enum before int/str since IntEnum/StrEnum inherit from those
+            return self.serialize_value(value.value)
         elif isinstance(value, bool):
             return {"BOOL": value}
         elif isinstance(value, str):
@@ -56,7 +60,7 @@ class Serializer:
             return {"B": value}
         elif isinstance(value, datetime):
             return {"S": value.isoformat()}
-        elif isinstance(value, list):
+        elif isinstance(value, (list, tuple)):
             return {"L": [self.serialize_value(v) for v in value]}
         elif isinstance(value, dict):
             return {"M": {k: self.serialize_value(v) for k, v in value.items()}}

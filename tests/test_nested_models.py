@@ -1,9 +1,40 @@
 """Integration tests for nested/complex model serialization."""
 
+from datetime import date
+from enum import Enum
+from uuid import UUID, uuid4
+
 import pytest
 from pydantic import BaseModel
 
 from magicmodel import MagicModel, MagicModelOperator
+
+
+class Status(str, Enum):
+    CREATED = "CREATED"
+    ACTIVE = "ACTIVE"
+    DELETED = "DELETED"
+
+
+class Priority(int, Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+
+# Model for testing edge case types
+class EdgeCaseModel(MagicModel):
+    name: str
+    # UUID field
+    correlationId: UUID | None = None
+    # date (not datetime)
+    birthDate: date | None = None
+    # Tuple field - Pydantic converts to list by default
+    coordinates: tuple[float, float] | None = None
+    # Deeply nested structure
+    metadata: dict | None = None
+    # List of tuples
+    points: list[tuple[float, float]] | None = None
 
 
 # Nested model (not a MagicModel, just a regular Pydantic BaseModel)
@@ -26,6 +57,8 @@ class Observability(BaseModel):
     provider: str | None = None
     apiKey: str | None = None
     endpoint: str | None = None
+    status: Status | None = None
+    priority: Priority | None = None
 
 
 # Main model with nested fields
@@ -260,3 +293,191 @@ class TestNestedModels:
         found = clean_nested_operator.find(Account, account_id)
         assert found.observability.provider == "prometheus"
         assert found.observability.endpoint == "http://prom:9090"
+
+
+class TestEnumSerialization:
+    """Tests for enum field serialization."""
+
+    def test_string_enum_in_nested_model(self, clean_nested_operator):
+        """Test that string enums serialize to their value, not 'Status.CREATED'."""
+        account = Account(
+            awsRegion="us-east-1",
+            awsAccountId="enum-test-001",
+            observability=Observability(
+                provider="datadog",
+                status=Status.ACTIVE,
+            ),
+        )
+
+        clean_nested_operator.create(account)
+
+        found = clean_nested_operator.find(Account, account.id)
+        assert found.observability.status == Status.ACTIVE
+        # The key test: ensure it deserializes back to the enum
+        assert found.observability.status.value == "ACTIVE"
+
+    def test_int_enum_in_nested_model(self, clean_nested_operator):
+        """Test that int enums serialize correctly."""
+        account = Account(
+            awsRegion="us-east-1",
+            awsAccountId="enum-test-002",
+            observability=Observability(
+                provider="prometheus",
+                priority=Priority.HIGH,
+            ),
+        )
+
+        clean_nested_operator.create(account)
+
+        found = clean_nested_operator.find(Account, account.id)
+        assert found.observability.priority == Priority.HIGH
+        assert found.observability.priority.value == 3
+
+    def test_update_with_enum(self, clean_nested_operator):
+        """Test updating a nested model containing enum fields."""
+        account = Account(
+            awsRegion="us-east-1",
+            awsAccountId="enum-test-003",
+            observability=Observability(
+                provider="newrelic",
+                status=Status.CREATED,
+                priority=Priority.LOW,
+            ),
+        )
+
+        clean_nested_operator.create(account)
+
+        # Update the nested model with new enum values
+        clean_nested_operator.update(
+            account,
+            observability=Observability(
+                provider="newrelic",
+                status=Status.ACTIVE,
+                priority=Priority.HIGH,
+            ),
+        )
+
+        found = clean_nested_operator.find(Account, account.id)
+        assert found.observability.status == Status.ACTIVE
+        assert found.observability.priority == Priority.HIGH
+
+
+class TestEdgeCaseSerialization:
+    """Tests for edge case type serialization."""
+
+    @pytest.fixture
+    def edge_operator(self, dynamodb_endpoint):
+        """Create a MagicModelOperator for edge case tests."""
+        return MagicModelOperator(
+            table_name="EdgeCaseTestTable",
+            endpoint_url=dynamodb_endpoint,
+            region_name="us-east-1",
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+        )
+
+    @pytest.fixture
+    def clean_edge_operator(self, edge_operator):
+        """Operator with cleanup after each test."""
+        yield edge_operator
+        type_name = EdgeCaseModel.get_type_name()
+        try:
+            response = edge_operator._client.query(
+                TableName=edge_operator._table_name,
+                KeyConditionExpression="#type = :type",
+                ExpressionAttributeNames={"#type": "Type"},
+                ExpressionAttributeValues={":type": {"S": type_name}},
+            )
+            for item in response.get("Items", []):
+                edge_operator._client.delete_item(
+                    TableName=edge_operator._table_name,
+                    Key={"Type": item["Type"], "ID": item["ID"]},
+                )
+        except Exception:
+            pass
+
+    def test_uuid_field(self, clean_edge_operator):
+        """Test that UUID fields serialize and deserialize correctly."""
+        test_uuid = uuid4()
+        model = EdgeCaseModel(
+            name="uuid-test",
+            correlationId=test_uuid,
+        )
+
+        clean_edge_operator.create(model)
+
+        found = clean_edge_operator.find(EdgeCaseModel, model.id)
+        assert found.correlationId == test_uuid
+        assert isinstance(found.correlationId, UUID)
+
+    def test_date_field(self, clean_edge_operator):
+        """Test that date fields serialize and deserialize correctly."""
+        test_date = date(2024, 6, 15)
+        model = EdgeCaseModel(
+            name="date-test",
+            birthDate=test_date,
+        )
+
+        clean_edge_operator.create(model)
+
+        found = clean_edge_operator.find(EdgeCaseModel, model.id)
+        # Note: date may come back as datetime or string depending on serialization
+        # The key is that it round-trips correctly
+        assert found.birthDate == test_date
+
+    def test_tuple_field(self, clean_edge_operator):
+        """Test that tuple fields serialize correctly (Pydantic may convert to list)."""
+        model = EdgeCaseModel(
+            name="tuple-test",
+            coordinates=(37.7749, -122.4194),
+        )
+
+        clean_edge_operator.create(model)
+
+        found = clean_edge_operator.find(EdgeCaseModel, model.id)
+        # Pydantic typically converts tuples to lists on deserialization
+        # But the values should be preserved
+        assert found.coordinates[0] == 37.7749
+        assert found.coordinates[1] == -122.4194
+
+    def test_deeply_nested_structure(self, clean_edge_operator):
+        """Test deeply nested dict/list structures."""
+        model = EdgeCaseModel(
+            name="nested-test",
+            metadata={
+                "level1": {
+                    "level2": {
+                        "items": [
+                            {"name": "item1", "values": [1, 2, 3]},
+                            {"name": "item2", "values": [4, 5, 6]},
+                        ],
+                        "count": 2,
+                    },
+                    "active": True,
+                },
+                "tags": ["a", "b", "c"],
+            },
+        )
+
+        clean_edge_operator.create(model)
+
+        found = clean_edge_operator.find(EdgeCaseModel, model.id)
+        assert found.metadata["level1"]["level2"]["count"] == 2
+        assert found.metadata["level1"]["level2"]["items"][0]["name"] == "item1"
+        assert found.metadata["level1"]["level2"]["items"][0]["values"] == [1, 2, 3]
+        assert found.metadata["level1"]["active"] is True
+        assert found.metadata["tags"] == ["a", "b", "c"]
+
+    def test_list_of_tuples(self, clean_edge_operator):
+        """Test list of tuples serialization."""
+        model = EdgeCaseModel(
+            name="list-tuples-test",
+            points=[(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)],
+        )
+
+        clean_edge_operator.create(model)
+
+        found = clean_edge_operator.find(EdgeCaseModel, model.id)
+        assert len(found.points) == 3
+        assert found.points[0][0] == 1.0
+        assert found.points[0][1] == 2.0
