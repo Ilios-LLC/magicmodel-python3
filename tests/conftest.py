@@ -75,9 +75,6 @@ def clean_operator(operator):
 
 def _cleanup_items(operator: MagicModelOperator, model_class: type[MagicModel]) -> None:
     """Delete all items of a given model type."""
-    # Reset any errors
-    operator._clear_error()
-
     # Get all items including soft-deleted
     type_name = model_class.get_type_name()
     try:

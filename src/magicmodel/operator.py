@@ -29,9 +29,9 @@ class MagicModelOperator:
     """
     Manages all DynamoDB interactions for MagicModel instances.
 
-    Translates the Go MagicModelOperator pattern to Python with:
+    Features:
     - Fluent method chaining
-    - Error accumulation pattern
+    - Native Python exception handling
     - WhereV4-style query building
 
     Example:
@@ -46,6 +46,12 @@ class MagicModelOperator:
 
         # Query with WhereV4 semantics
         dogs = mm.where(Dog, "breed", ["Labrador", "Dalmatian"]).execute()
+
+        # Error handling with try/except
+        try:
+            mm.create(dog).update(dog, name="Rex")
+        except MagicModelError as e:
+            print(f"Operation failed: {e}")
     """
 
     def __init__(
@@ -70,7 +76,6 @@ class MagicModelOperator:
         """
         self._table_name = table_name
         self._endpoint_url = endpoint_url
-        self._error: Exception | None = None
 
         # Initialize client
         if client is not None:
@@ -88,20 +93,6 @@ class MagicModelOperator:
         # Auto-create table if configured
         if auto_create_table:
             self._ensure_table_exists()
-
-    @property
-    def error(self) -> Exception | None:
-        """Get the current error state (Go-style error chaining)."""
-        return self._error
-
-    def _clear_error(self) -> None:
-        """Clear the error state."""
-        self._error = None
-
-    def _set_error(self, error: Exception) -> MagicModelOperator:
-        """Set error and return self for chaining."""
-        self._error = error
-        return self
 
     # ==================== Table Management ====================
 
@@ -151,14 +142,18 @@ class MagicModelOperator:
 
         Returns:
             Self for method chaining
-        """
-        if self._error:
-            return self
 
+        Raises:
+            MagicModelError: If the model already has an ID or creation fails
+            ItemAlreadyExistsError: If an item with the same ID already exists
+        """
         try:
             model._prepare_for_create()
-            item = self._serializer.serialize(model)
+        except ValueError as e:
+            raise MagicModelError(str(e)) from e
 
+        try:
+            item = self._serializer.serialize(model)
             self._client.put_item(
                 TableName=self._table_name,
                 Item=item,
@@ -166,18 +161,14 @@ class MagicModelOperator:
             )
         except ClientError as e:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                return self._set_error(
-                    ItemAlreadyExistsError(f"Item with ID {model.id} already exists")
-                )
-            return self._set_error(MagicModelError(f"Create failed: {e}"))
-        except ValueError as e:
-            return self._set_error(MagicModelError(str(e)))
-        except Exception as e:
-            return self._set_error(MagicModelError(f"Create failed: {e}"))
+                raise ItemAlreadyExistsError(
+                    f"Item with ID {model.id} already exists"
+                ) from e
+            raise MagicModelError(f"Create failed: {e}") from e
 
         return self
 
-    def find(self, model_class: type[T], id: str) -> T | None:
+    def find(self, model_class: type[T], id: str) -> T:
         """
         Find an item by ID.
 
@@ -186,11 +177,12 @@ class MagicModelOperator:
             id: The item ID
 
         Returns:
-            The found model instance or None
-        """
-        if self._error:
-            return None
+            The found model instance
 
+        Raises:
+            ItemNotFoundError: If the item is not found
+            MagicModelError: If the find operation fails
+        """
         try:
             type_name = model_class.get_type_name()
             response = self._client.get_item(
@@ -202,13 +194,13 @@ class MagicModelOperator:
             )
 
             if "Item" not in response:
-                self._set_error(ItemNotFoundError(f"Item not found: {id}"))
-                return None
+                raise ItemNotFoundError(f"Item not found: {id}")
 
             return self._deserializer.deserialize(response["Item"], model_class)
+        except ItemNotFoundError:
+            raise
         except Exception as e:
-            self._set_error(MagicModelError(f"Find failed: {e}"))
-            return None
+            raise MagicModelError(f"Find failed: {e}") from e
 
     def save(self, model: T) -> MagicModelOperator:
         """
@@ -221,10 +213,10 @@ class MagicModelOperator:
 
         Returns:
             Self for method chaining
-        """
-        if self._error:
-            return self
 
+        Raises:
+            MagicModelError: If the save operation fails
+        """
         try:
             model._prepare_for_save()
             item = self._serializer.serialize(model)
@@ -234,7 +226,7 @@ class MagicModelOperator:
                 Item=item,
             )
         except Exception as e:
-            return self._set_error(MagicModelError(f"Save failed: {e}"))
+            raise MagicModelError(f"Save failed: {e}") from e
 
         return self
 
@@ -248,10 +240,10 @@ class MagicModelOperator:
 
         Returns:
             Self for method chaining
-        """
-        if self._error:
-            return self
 
+        Raises:
+            MagicModelError: If the update operation fails
+        """
         if not updates:
             return self
 
@@ -296,7 +288,7 @@ class MagicModelOperator:
                 ExpressionAttributeValues=attr_values,
             )
         except Exception as e:
-            return self._set_error(MagicModelError(f"Update failed: {e}"))
+            raise MagicModelError(f"Update failed: {e}") from e
 
         return self
 
@@ -309,10 +301,10 @@ class MagicModelOperator:
 
         Returns:
             Self for method chaining
-        """
-        if self._error:
-            return self
 
+        Raises:
+            MagicModelError: If the delete operation fails
+        """
         try:
             self._client.delete_item(
                 TableName=self._table_name,
@@ -322,7 +314,7 @@ class MagicModelOperator:
                 },
             )
         except Exception as e:
-            return self._set_error(MagicModelError(f"Delete failed: {e}"))
+            raise MagicModelError(f"Delete failed: {e}") from e
 
         return self
 
@@ -335,10 +327,10 @@ class MagicModelOperator:
 
         Returns:
             Self for method chaining
-        """
-        if self._error:
-            return self
 
+        Raises:
+            MagicModelError: If the soft delete operation fails
+        """
         now = datetime.now(tz=None)
 
         try:
@@ -361,7 +353,7 @@ class MagicModelOperator:
             model.deleted_at = now
             model.updated_at = now
         except Exception as e:
-            return self._set_error(MagicModelError(f"Soft delete failed: {e}"))
+            raise MagicModelError(f"Soft delete failed: {e}") from e
 
         return self
 
@@ -378,10 +370,10 @@ class MagicModelOperator:
 
         Returns:
             List of model instances
-        """
-        if self._error:
-            return []
 
+        Raises:
+            MagicModelError: If the query fails
+        """
         try:
             type_name = model_class.get_type_name()
 
@@ -404,8 +396,7 @@ class MagicModelOperator:
                 for item in response.get("Items", [])
             ]
         except Exception as e:
-            self._set_error(MagicModelError(f"All query failed: {e}"))
-            return []
+            raise MagicModelError(f"All query failed: {e}") from e
 
     def where(
         self,

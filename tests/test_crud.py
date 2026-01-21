@@ -1,6 +1,8 @@
 """Integration tests for CRUD operations."""
 
-from magicmodel import ItemNotFoundError
+import pytest
+
+from magicmodel import ItemNotFoundError, MagicModelError
 
 from .conftest import Dog
 
@@ -15,7 +17,6 @@ class TestCreate:
 
         clean_operator.create(dog)
 
-        assert clean_operator.error is None
         assert dog.id != ""
         assert len(dog.id) == 36  # UUID format
 
@@ -43,10 +44,8 @@ class TestCreate:
         dog.id = "existing-id"
         dog.type = "dog"
 
-        clean_operator.create(dog)
-
-        assert clean_operator.error is not None
-        assert "already has an ID" in str(clean_operator.error)
+        with pytest.raises(MagicModelError, match="already has an ID"):
+            clean_operator.create(dog)
 
 
 class TestFind:
@@ -65,12 +64,10 @@ class TestFind:
         assert found.name == "Rex"
         assert found.breed == "German Shepherd"
 
-    def test_find_returns_none_for_missing(self, clean_operator):
-        """Test that find returns None for non-existent ID."""
-        found = clean_operator.find(Dog, "non-existent-id")
-
-        assert found is None
-        assert isinstance(clean_operator.error, ItemNotFoundError)
+    def test_find_raises_for_missing(self, clean_operator):
+        """Test that find raises ItemNotFoundError for non-existent ID."""
+        with pytest.raises(ItemNotFoundError):
+            clean_operator.find(Dog, "non-existent-id")
 
     def test_find_preserves_all_fields(self, clean_operator, dog_factory):
         """Test that find preserves all model fields."""
@@ -104,7 +101,6 @@ class TestSave:
 
         clean_operator.save(dog)
 
-        assert clean_operator.error is None
         assert dog.id != ""
 
         found = clean_operator.find(Dog, dog.id)
@@ -121,8 +117,6 @@ class TestSave:
         dog.name = "Spot Jr."
         dog.age = 4
         clean_operator.save(dog)
-
-        assert clean_operator.error is None
 
         found = clean_operator.find(Dog, dog.id)
         assert found is not None
@@ -142,7 +136,6 @@ class TestUpdate:
 
         clean_operator.update(dog, breed="Mixed")
 
-        assert clean_operator.error is None
         assert dog.breed == "Mixed"
 
         found = clean_operator.find(Dog, dog.id)
@@ -156,7 +149,6 @@ class TestUpdate:
 
         clean_operator.update(dog, name="Duke Jr.", age=3, status="SENIOR")
 
-        assert clean_operator.error is None
         assert dog.name == "Duke Jr."
         assert dog.age == 3
         assert dog.status == "SENIOR"
@@ -183,25 +175,17 @@ class TestDelete:
 
         clean_operator.delete(dog)
 
-        assert clean_operator.error is None
-
-        # Clear error to check find
-        clean_operator._clear_error()
-        found = clean_operator.find(Dog, dog_id)
-
-        assert found is None
-        assert isinstance(clean_operator.error, ItemNotFoundError)
+        with pytest.raises(ItemNotFoundError):
+            clean_operator.find(Dog, dog_id)
 
     def test_delete_is_idempotent(self, clean_operator, dog_factory):
         """Test that deleting a non-existent item doesn't error."""
         dog = dog_factory()
         clean_operator.create(dog)
 
-        # Delete twice
+        # Delete twice - should not raise
         clean_operator.delete(dog)
         clean_operator.delete(dog)
-
-        assert clean_operator.error is None
 
 
 class TestMethodChaining:
@@ -213,7 +197,6 @@ class TestMethodChaining:
 
         clean_operator.create(dog).update(dog, status="UPDATED")
 
-        assert clean_operator.error is None
         assert dog.status == "UPDATED"
 
     def test_error_stops_chain(self, clean_operator, dog_factory):
@@ -222,9 +205,9 @@ class TestMethodChaining:
         dog.id = "preset-id"
         dog.type = "dog"
 
-        # This should fail because of preset ID
-        clean_operator.create(dog).update(dog, name="Should not update")
+        # This should fail because of preset ID and stop the chain
+        with pytest.raises(MagicModelError, match="already has an ID"):
+            clean_operator.create(dog).update(dog, name="Should not update")
 
-        assert clean_operator.error is not None
         # Update should not have been applied
         assert dog.name != "Should not update"

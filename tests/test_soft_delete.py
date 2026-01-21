@@ -15,7 +15,6 @@ class TestSoftDelete:
 
         clean_operator.soft_delete(dog)
 
-        assert clean_operator.error is None
         assert dog.deleted_at is not None
 
     def test_soft_delete_item_still_exists(self, clean_operator, dog_factory):

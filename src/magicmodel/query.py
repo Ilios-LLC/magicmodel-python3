@@ -87,23 +87,22 @@ class QueryBuilder(Generic[T]):
 
         Returns:
             List of model instances matching all conditions
-        """
-        if self._operator.error:
-            return []
 
+        Raises:
+            ValidationError: If no conditions are specified
+            MagicModelError: If the query fails
+        """
         if not self._conditions:
             from .exceptions import ValidationError
 
-            self._operator._set_error(ValidationError("No conditions specified for where query"))
-            return []
+            raise ValidationError("No conditions specified for where query")
 
         try:
             return self._execute_query()
         except Exception as e:
             from .exceptions import MagicModelError
 
-            self._operator._set_error(MagicModelError(f"Query failed: {e}"))
-            return []
+            raise MagicModelError(f"Query failed: {e}") from e
 
     def _execute_query(self) -> list[T]:
         """Build and execute the DynamoDB query."""

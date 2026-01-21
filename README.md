@@ -105,20 +105,30 @@ All models automatically have these fields:
 
 ## Error Handling
 
+MagicModel uses native Python exceptions for error handling:
+
 ```python
 from magicmodel import ItemNotFoundError, MagicModelError
 
 mm = MagicModelOperator(table_name="MyTable")
 
-# Check for errors after operations
-mm.create(dog)
-if mm.error:
-    print(f"Create failed: {mm.error}")
+# Exceptions are raised on failure
+try:
+    mm.create(dog)
+except MagicModelError as e:
+    print(f"Create failed: {e}")
 
-# Or handle specific exceptions
-dog = mm.find(Dog, "non-existent-id")
-if isinstance(mm.error, ItemNotFoundError):
+# Handle specific exceptions
+try:
+    dog = mm.find(Dog, "non-existent-id")
+except ItemNotFoundError:
     print("Dog not found")
+
+# Method chaining stops naturally on error
+try:
+    mm.create(dog).update(dog, name="Rex").save(dog)
+except MagicModelError as e:
+    print(f"Operation failed: {e}")
 ```
 
 ## Development
