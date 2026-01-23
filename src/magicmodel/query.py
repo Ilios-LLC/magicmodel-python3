@@ -122,8 +122,21 @@ class QueryBuilder(Generic[T]):
 
         # Add field conditions
         for i, condition in enumerate(self._conditions):
-            field_alias = f"#f{i}"
-            attr_names[field_alias] = condition.field_name
+            # Handle dot notation for nested fields
+            field_parts = condition.field_name.split(".")
+            if len(field_parts) > 1:
+                # Nested field: "observability.provider" -> "#f0_0.#f0_1"
+                path_aliases = []
+                for j, part in enumerate(field_parts):
+                    alias = f"#f{i}_{j}"
+                    attr_names[alias] = part
+                    path_aliases.append(alias)
+                field_path = ".".join(path_aliases)
+            else:
+                # Simple field
+                field_alias = f"#f{i}"
+                attr_names[field_alias] = condition.field_name
+                field_path = field_alias
 
             if len(condition.field_values) == 1:
                 # Single value - equality
@@ -131,7 +144,7 @@ class QueryBuilder(Generic[T]):
                 attr_values[value_alias] = self._operator._serializer.serialize_value(
                     condition.field_values[0]
                 )
-                filter_parts.append(f"{field_alias} = {value_alias}")
+                filter_parts.append(f"{field_path} = {value_alias}")
             else:
                 # Multiple values - IN operator
                 value_aliases = []
@@ -141,7 +154,7 @@ class QueryBuilder(Generic[T]):
                     value_aliases.append(value_alias)
 
                 in_clause = ", ".join(value_aliases)
-                filter_parts.append(f"{field_alias} IN ({in_clause})")
+                filter_parts.append(f"{field_path} IN ({in_clause})")
 
         # Combine filter expressions with AND
         filter_expression = " AND ".join(filter_parts)

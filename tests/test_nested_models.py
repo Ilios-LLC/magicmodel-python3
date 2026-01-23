@@ -481,3 +481,120 @@ class TestEdgeCaseSerialization:
         assert len(found.points) == 3
         assert found.points[0][0] == 1.0
         assert found.points[0][1] == 2.0
+
+
+class TestNestedFieldWhere:
+    """Tests for where() with dot notation on nested fields."""
+
+    def test_where_nested_field_single_value(self, clean_nested_operator):
+        """Test where with dot notation on a nested field."""
+        a1 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="100",
+            observability=Observability(provider="datadog"),
+        )
+        a2 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="200",
+            observability=Observability(provider="prometheus"),
+        )
+
+        clean_nested_operator.create(a1)
+        clean_nested_operator.create(a2)
+
+        results = clean_nested_operator.where(
+            Account, "observability.provider", "datadog"
+        ).execute()
+
+        assert len(results) == 1
+        assert results[0].observability.provider == "datadog"
+
+    def test_where_nested_field_multiple_values(self, clean_nested_operator):
+        """Test where with dot notation and OR semantics."""
+        a1 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="300",
+            observability=Observability(provider="datadog"),
+        )
+        a2 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="400",
+            observability=Observability(provider="prometheus"),
+        )
+        a3 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="500",
+            observability=Observability(provider="newrelic"),
+        )
+
+        clean_nested_operator.create(a1)
+        clean_nested_operator.create(a2)
+        clean_nested_operator.create(a3)
+
+        results = clean_nested_operator.where(
+            Account, "observability.provider", ["datadog", "prometheus"]
+        ).execute()
+
+        assert len(results) == 2
+        providers = {r.observability.provider for r in results}
+        assert providers == {"datadog", "prometheus"}
+
+    def test_where_nested_field_chained_with_top_level(self, clean_nested_operator):
+        """Test chaining a nested field where with a top-level field."""
+        a1 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="600",
+            name="Account1",
+            observability=Observability(provider="datadog"),
+        )
+        a2 = Account(
+            awsRegion="us-west-2",
+            awsAccountId="700",
+            name="Account2",
+            observability=Observability(provider="datadog"),
+        )
+
+        clean_nested_operator.create(a1)
+        clean_nested_operator.create(a2)
+
+        results = (
+            clean_nested_operator.where(
+                Account, "observability.provider", "datadog", chain=True
+            )
+            .where("awsRegion", "us-east-1")
+            .execute()
+        )
+
+        assert len(results) == 1
+        assert results[0].name == "Account1"
+
+    def test_where_deeply_nested_field(self, clean_nested_operator):
+        """Test where with a deeper nested path (orchestratorStackOutputs.vpcId)."""
+        a1 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="800",
+            orchestratorStackOutputs=OrchestratorStackOutputs(
+                vpcId="vpc-aaa",
+                privateSubnetIds=[],
+                publicSubnetIds=[],
+            ),
+        )
+        a2 = Account(
+            awsRegion="us-east-1",
+            awsAccountId="900",
+            orchestratorStackOutputs=OrchestratorStackOutputs(
+                vpcId="vpc-bbb",
+                privateSubnetIds=[],
+                publicSubnetIds=[],
+            ),
+        )
+
+        clean_nested_operator.create(a1)
+        clean_nested_operator.create(a2)
+
+        results = clean_nested_operator.where(
+            Account, "orchestratorStackOutputs.vpcId", "vpc-aaa"
+        ).execute()
+
+        assert len(results) == 1
+        assert results[0].orchestratorStackOutputs.vpcId == "vpc-aaa"
