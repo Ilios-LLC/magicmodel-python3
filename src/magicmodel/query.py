@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union
+
+from pydantic import BaseModel
 
 from .model import MagicModel
 
@@ -81,6 +83,46 @@ class QueryBuilder(Generic[T]):
         self._is_chain = chain
         return self
 
+    def _resolve_db_field_name(self, part: str, depth: int, full_path: list[str]) -> str:
+        """Resolve a Python field name to its DynamoDB attribute name (matching model_dump(by_alias=True))."""
+        model_class = self._model_class
+
+        if depth > 0:
+            # For nested paths, try to get the nested model's class
+            model_class = self._get_nested_model_class(full_path[:depth])
+            if not model_class:
+                return part
+
+        field_info = model_class.model_fields.get(part)
+        if field_info:
+            if field_info.serialization_alias:
+                return field_info.serialization_alias
+            if field_info.alias:
+                return field_info.alias
+        alias_generator = model_class.model_config.get("alias_generator")
+        if alias_generator and callable(alias_generator):
+            return alias_generator(part)
+        return part
+
+    def _get_nested_model_class(self, path: list[str]) -> type | None:
+        """Walk the field path to find the nested model class."""
+        current_class: type = self._model_class
+        for part in path:
+            field_info = current_class.model_fields.get(part)
+            if not field_info or not field_info.annotation:
+                return None
+            annotation = field_info.annotation
+            # Unwrap Optional[X] (Union[X, None])
+            origin = getattr(annotation, "__origin__", None)
+            if origin is Union:
+                args = [a for a in annotation.__args__ if a is not type(None)]
+                annotation = args[0] if args else annotation
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                current_class = annotation
+            else:
+                return None
+        return current_class
+
     def execute(self) -> list[T]:
         """
         Execute the query and return results.
@@ -129,13 +171,15 @@ class QueryBuilder(Generic[T]):
                 path_aliases = []
                 for j, part in enumerate(field_parts):
                     alias = f"#f{i}_{j}"
-                    attr_names[alias] = part
+                    db_name = self._resolve_db_field_name(part, j, field_parts)
+                    attr_names[alias] = db_name
                     path_aliases.append(alias)
                 field_path = ".".join(path_aliases)
             else:
-                # Simple field
+                # Simple field - resolve alias to match model_dump(by_alias=True)
                 field_alias = f"#f{i}"
-                attr_names[field_alias] = condition.field_name
+                db_name = self._resolve_db_field_name(condition.field_name, 0, [condition.field_name])
+                attr_names[field_alias] = db_name
                 field_path = field_alias
 
             if len(condition.field_values) == 1:
