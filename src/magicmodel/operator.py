@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import boto3
-
-logger = logging.getLogger(__name__)
 from botocore.exceptions import ClientError
 
 from .exceptions import (
@@ -188,7 +185,6 @@ class MagicModelOperator:
         """
         try:
             type_name = model_class.get_type_name()
-            logger.info(f"[find] table={self._table_name} Type={type_name} ID={id}")
             response = self._client.get_item(
                 TableName=self._table_name,
                 Key={
@@ -200,9 +196,7 @@ class MagicModelOperator:
             if "Item" not in response:
                 raise ItemNotFoundError(f"Item not found: {id}")
 
-            result = self._deserializer.deserialize(response["Item"], model_class)
-            logger.info(f"[find] found: id={result.id} type={result.type} updated_at={result.updated_at}")
-            return result
+            return self._deserializer.deserialize(response["Item"], model_class)
         except ItemNotFoundError:
             raise
         except Exception as e:
@@ -227,18 +221,11 @@ class MagicModelOperator:
             model._prepare_for_save()
             item = self._serializer.serialize(model)
 
-            logger.info(
-                f"[save] table={self._table_name} Type={item.get('Type')} ID={item.get('ID')} "
-                f"updated_at={item.get('UpdatedAt')} status={item.get('status')}"
-            )
-
             self._client.put_item(
                 TableName=self._table_name,
                 Item=item,
             )
-            logger.info("[save] put_item succeeded")
         except Exception as e:
-            logger.error(f"[save] failed: {e}")
             raise MagicModelError(f"Save failed: {e}") from e
 
         return self
