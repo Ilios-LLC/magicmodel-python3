@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import boto3
@@ -254,7 +254,7 @@ class MagicModelOperator:
             attr_values: dict[str, Any] = {}
 
             # Always update updated_at
-            now = datetime.now(tz=None)
+            now = datetime.now(tz=timezone.utc)
             updates["updated_at"] = now
 
             for field_name, value in updates.items():
@@ -338,7 +338,7 @@ class MagicModelOperator:
         Raises:
             MagicModelError: If the soft delete operation fails
         """
-        now = datetime.now(tz=None)
+        now = datetime.now(tz=timezone.utc)
 
         try:
             self._client.update_item(

@@ -1,7 +1,7 @@
 """Base MagicModel class for DynamoDB entities."""
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import ClassVar
 from uuid import uuid4
 
@@ -46,11 +46,11 @@ class MagicModel(BaseModel):
 
     # Timestamp fields
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(tz=None),
+        default_factory=lambda: datetime.now(tz=timezone.utc),
         alias="CreatedAt",
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(tz=None),
+        default_factory=lambda: datetime.now(tz=timezone.utc),
         alias="UpdatedAt",
     )
     deleted_at: datetime | None = Field(default=None, alias="DeletedAt")
@@ -73,7 +73,7 @@ class MagicModel(BaseModel):
         if self.id:
             raise ValueError("Cannot create: item already has an ID. Use save() for updates.")
 
-        now = datetime.now(tz=None)
+        now = datetime.now(tz=timezone.utc)
         self.id = str(uuid4())
         self.type = self.get_type_name()
         self.created_at = now
@@ -81,7 +81,7 @@ class MagicModel(BaseModel):
 
     def _prepare_for_save(self) -> None:
         """Set Type and timestamps for save (upsert) operation."""
-        now = datetime.now(tz=None)
+        now = datetime.now(tz=timezone.utc)
         if not self.id:
             self.id = str(uuid4())
             self.created_at = now

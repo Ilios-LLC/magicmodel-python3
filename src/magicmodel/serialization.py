@@ -1,6 +1,6 @@
 """Serialization and deserialization for DynamoDB AttributeValue format."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, TypeVar
@@ -59,6 +59,9 @@ class Serializer:
         elif isinstance(value, bytes):
             return {"B": value}
         elif isinstance(value, datetime):
+            # Ensure timezone info is always present (RFC3339 compat for Go)
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
             return {"S": value.isoformat()}
         elif isinstance(value, (list, tuple)):
             return {"L": [self.serialize_value(v) for v in value]}
