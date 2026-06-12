@@ -158,94 +158,149 @@ class QueryBuilder(Generic[T]):
 
             raise MagicModelError(f"Query failed: {e}") from e
 
+    def _resolve_field_path(
+        self,
+        condition: WhereCondition,
+        index: Any,
+        attr_names: dict[str, str],
+    ) -> str:
+        """Resolve a condition's field name to a DynamoDB expression path."""
+        field_parts = condition.field_name.split(".")
+        if len(field_parts) > 1:
+            path_aliases = []
+            for j, part in enumerate(field_parts):
+                alias = f"#f{index}_{j}"
+                db_name = self._resolve_db_field_name(part, j, field_parts)
+                attr_names[alias] = db_name
+                path_aliases.append(alias)
+            return ".".join(path_aliases)
+        else:
+            field_alias = f"#f{index}"
+            db_name = self._resolve_db_field_name(
+                condition.field_name, 0, [condition.field_name]
+            )
+            attr_names[field_alias] = db_name
+            return field_alias
+
+    def _build_condition_expr(
+        self,
+        condition: WhereCondition,
+        field_path: str,
+        index: Any,
+        attr_values: dict[str, Any],
+    ) -> str:
+        """Build a single condition expression string and populate attr_values."""
+        op = condition.operator
+
+        if op == "=" and len(condition.field_values) > 1:
+            value_aliases = []
+            for j, val in enumerate(condition.field_values):
+                value_alias = f":v{index}_{j}"
+                attr_values[value_alias] = self._operator._serializer.serialize_value(val)
+                value_aliases.append(value_alias)
+            return f"{field_path} IN ({', '.join(value_aliases)})"
+        elif op == "between":
+            start_alias = f":v{index}_start"
+            end_alias = f":v{index}_end"
+            attr_values[start_alias] = self._operator._serializer.serialize_value(
+                condition.field_values[0]
+            )
+            attr_values[end_alias] = self._operator._serializer.serialize_value(
+                condition.field_values[1]
+            )
+            return f"{field_path} BETWEEN {start_alias} AND {end_alias}"
+        elif op == "begins_with":
+            value_alias = f":v{index}"
+            attr_values[value_alias] = self._operator._serializer.serialize_value(
+                condition.field_values[0]
+            )
+            return f"begins_with({field_path}, {value_alias})"
+        elif op in ("!=", "<>"):
+            value_alias = f":v{index}"
+            attr_values[value_alias] = self._operator._serializer.serialize_value(
+                condition.field_values[0]
+            )
+            return f"{field_path} <> {value_alias}"
+        else:
+            value_alias = f":v{index}"
+            attr_values[value_alias] = self._operator._serializer.serialize_value(
+                condition.field_values[0]
+            )
+            return f"{field_path} {op} {value_alias}"
+
+    def _find_gsi_match(
+        self,
+    ) -> tuple[str | None, list[WhereCondition], list[WhereCondition]]:
+        """
+        Check if any conditions can be served by a GSI.
+
+        Returns:
+            (index_name, gsi_conditions, remaining_conditions)
+            or (None, [], self._conditions) if no GSI matches.
+        """
+        indexed_fields = getattr(self._model_class, "__indexed__", None)
+        if not indexed_fields:
+            return None, [], list(self._conditions)
+
+        for field_name in indexed_fields:
+            gsi_conds = [c for c in self._conditions if c.field_name == field_name]
+            if gsi_conds:
+                remaining = [c for c in self._conditions if c.field_name != field_name]
+                return f"gsi_{field_name}", gsi_conds, remaining
+
+        return None, [], list(self._conditions)
+
     def _execute_query(self) -> list[T]:
-        """Build and execute the DynamoDB query."""
+        """Build and execute the DynamoDB query, using GSI when available."""
         type_name = self._model_class.get_type_name()
 
-        # Build expression components
-        key_condition = "#type = :type"
-        filter_parts: list[str] = []
         attr_names: dict[str, str] = {"#type": "Type", "#deleted": "DeletedAt"}
         attr_values: dict[str, Any] = {
             ":type": {"S": type_name},
             ":null": {"NULL": True},
         }
 
-        # Add soft delete filter
+        # Check for GSI match
+        index_name, gsi_conditions, remaining_conditions = self._find_gsi_match()
+
+        # Build key condition
+        key_parts = ["#type = :type"]
+
+        if index_name and gsi_conditions:
+            for i, condition in enumerate(gsi_conditions):
+                field_path = self._resolve_field_path(condition, f"k{i}", attr_names)
+                expr = self._build_condition_expr(
+                    condition, field_path, f"k{i}", attr_values
+                )
+                key_parts.append(expr)
+
+        key_condition = " AND ".join(key_parts)
+
+        # Build filter expression from remaining conditions
+        filter_parts: list[str] = []
         filter_parts.append("(attribute_not_exists(#deleted) OR #deleted = :null)")
 
-        # Add field conditions
-        for i, condition in enumerate(self._conditions):
-            # Handle dot notation for nested fields
-            field_parts = condition.field_name.split(".")
-            if len(field_parts) > 1:
-                path_aliases = []
-                for j, part in enumerate(field_parts):
-                    alias = f"#f{i}_{j}"
-                    db_name = self._resolve_db_field_name(part, j, field_parts)
-                    attr_names[alias] = db_name
-                    path_aliases.append(alias)
-                field_path = ".".join(path_aliases)
-            else:
-                field_alias = f"#f{i}"
-                db_name = self._resolve_db_field_name(
-                    condition.field_name, 0, [condition.field_name]
-                )
-                attr_names[field_alias] = db_name
-                field_path = field_alias
+        conditions_for_filter = remaining_conditions if index_name else self._conditions
+        for i, condition in enumerate(conditions_for_filter):
+            field_path = self._resolve_field_path(condition, i, attr_names)
+            expr = self._build_condition_expr(condition, field_path, i, attr_values)
+            filter_parts.append(expr)
 
-            op = condition.operator
+        # Build query kwargs
+        query_kwargs: dict[str, Any] = {
+            "TableName": self._operator._table_name,
+            "KeyConditionExpression": key_condition,
+            "ExpressionAttributeNames": attr_names,
+            "ExpressionAttributeValues": attr_values,
+        }
 
-            if op == "=" and len(condition.field_values) > 1:
-                # Multiple values — IN operator (existing behavior)
-                value_aliases = []
-                for j, val in enumerate(condition.field_values):
-                    value_alias = f":v{i}_{j}"
-                    attr_values[value_alias] = self._operator._serializer.serialize_value(val)
-                    value_aliases.append(value_alias)
-                in_clause = ", ".join(value_aliases)
-                filter_parts.append(f"{field_path} IN ({in_clause})")
-            elif op == "between":
-                start_alias = f":v{i}_start"
-                end_alias = f":v{i}_end"
-                attr_values[start_alias] = self._operator._serializer.serialize_value(
-                    condition.field_values[0]
-                )
-                attr_values[end_alias] = self._operator._serializer.serialize_value(
-                    condition.field_values[1]
-                )
-                filter_parts.append(f"{field_path} BETWEEN {start_alias} AND {end_alias}")
-            elif op == "begins_with":
-                value_alias = f":v{i}"
-                attr_values[value_alias] = self._operator._serializer.serialize_value(
-                    condition.field_values[0]
-                )
-                filter_parts.append(f"begins_with({field_path}, {value_alias})")
-            elif op in ("!=", "<>"):
-                value_alias = f":v{i}"
-                attr_values[value_alias] = self._operator._serializer.serialize_value(
-                    condition.field_values[0]
-                )
-                filter_parts.append(f"{field_path} <> {value_alias}")
-            else:
-                # =, >, >=, <, <=
-                value_alias = f":v{i}"
-                attr_values[value_alias] = self._operator._serializer.serialize_value(
-                    condition.field_values[0]
-                )
-                filter_parts.append(f"{field_path} {op} {value_alias}")
+        if index_name:
+            query_kwargs["IndexName"] = index_name
 
-        # Combine filter expressions with AND
-        filter_expression = " AND ".join(filter_parts)
+        if filter_parts:
+            query_kwargs["FilterExpression"] = " AND ".join(filter_parts)
 
-        # Execute query
-        response = self._operator._client.query(
-            TableName=self._operator._table_name,
-            KeyConditionExpression=key_condition,
-            FilterExpression=filter_expression,
-            ExpressionAttributeNames=attr_names,
-            ExpressionAttributeValues=attr_values,
-        )
+        response = self._operator._client.query(**query_kwargs)
 
         return [
             self._operator._deserializer.deserialize(item, self._model_class)

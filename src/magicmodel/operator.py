@@ -89,6 +89,7 @@ class MagicModelOperator:
         # Initialize helpers
         self._serializer = Serializer()
         self._deserializer = Deserializer()
+        self._checked_indexes: set[type] = set()
 
         # Auto-create table if configured
         if auto_create_table:
@@ -128,6 +129,138 @@ class MagicModelOperator:
             if e.response["Error"]["Code"] != "ResourceInUseException":
                 raise TableCreationError(f"Failed to create table: {e}") from e
 
+    def _wait_for_table_active(self) -> None:
+        """Wait until the table and all GSIs are ACTIVE."""
+        import time
+
+        for _ in range(120):
+            desc = self._client.describe_table(TableName=self._table_name)
+            table = desc["Table"]
+            if table["TableStatus"] != "ACTIVE":
+                time.sleep(0.5)
+                continue
+            # Also check that all GSIs are ACTIVE
+            gsis = table.get("GlobalSecondaryIndexes", [])
+            if all(g.get("IndexStatus") == "ACTIVE" for g in gsis):
+                return
+            time.sleep(0.5)
+        raise MagicModelError(f"Table {self._table_name} did not become ACTIVE in time")
+
+    # ==================== Index Management ====================
+
+    @staticmethod
+    def _get_dynamodb_attr_type(model_class: type[MagicModel], field_name: str) -> str:
+        """Determine DynamoDB attribute type (S, N, B) from model field annotation."""
+        from decimal import Decimal
+        from typing import Union
+
+        field_info = model_class.model_fields.get(field_name)
+        if not field_info or not field_info.annotation:
+            return "S"
+
+        annotation = field_info.annotation
+        origin = getattr(annotation, "__origin__", None)
+        if origin is Union:
+            args = [a for a in annotation.__args__ if a is not type(None)]
+            annotation = args[0] if args else annotation
+
+        if annotation in (int, float, Decimal):
+            return "N"
+        if annotation is bytes:
+            return "B"
+        return "S"
+
+    @staticmethod
+    def _resolve_field_db_name(model_class: type[MagicModel], field_name: str) -> str:
+        """Resolve a Python field name to its DynamoDB attribute name."""
+        field_info = model_class.model_fields.get(field_name)
+        if field_info:
+            if field_info.serialization_alias:
+                return field_info.serialization_alias
+            if field_info.alias:
+                return field_info.alias
+        alias_generator = model_class.model_config.get("alias_generator")
+        if alias_generator and callable(alias_generator):
+            return alias_generator(field_name)
+        return field_name
+
+    def _auto_ensure_indexes(self, model_class: type[MagicModel]) -> None:
+        """Auto-create GSIs on first use of a model. Cached per model class."""
+        if model_class in self._checked_indexes:
+            return
+        self._checked_indexes.add(model_class)
+        self.ensure_indexes(model_class)
+
+    def ensure_indexes(self, model_class: type[MagicModel]) -> MagicModelOperator:
+        """
+        Create any missing GSIs for fields listed in the model's __indexed__.
+
+        Idempotent — safe to call multiple times. Skips indexes that already exist.
+        Each indexed field gets a GSI named "gsi_{field_name}" with Type as partition
+        key and the field as sort key.
+
+        Called automatically on first use of a model with __indexed__. You only need
+        to call this explicitly for migration scripts or eager setup.
+
+        Args:
+            model_class: The model class with __indexed__ field list
+
+        Returns:
+            Self for method chaining
+        """
+        indexed_fields = getattr(model_class, "__indexed__", None)
+        if not indexed_fields:
+            return self
+
+        # Get existing GSI names
+        try:
+            desc = self._client.describe_table(TableName=self._table_name)
+            existing = {
+                g["IndexName"]
+                for g in desc["Table"].get("GlobalSecondaryIndexes", [])
+            }
+        except Exception as e:
+            raise MagicModelError(f"Failed to describe table for index check: {e}") from e
+
+        for field_name in indexed_fields:
+            index_name = f"gsi_{field_name}"
+            if index_name in existing:
+                continue
+
+            db_attr_name = self._resolve_field_db_name(model_class, field_name)
+            attr_type = self._get_dynamodb_attr_type(model_class, field_name)
+
+            # Wait for table to be ACTIVE before creating index
+            self._wait_for_table_active()
+
+            try:
+                self._client.update_table(
+                    TableName=self._table_name,
+                    AttributeDefinitions=[
+                        {"AttributeName": "Type", "AttributeType": "S"},
+                        {"AttributeName": db_attr_name, "AttributeType": attr_type},
+                    ],
+                    GlobalSecondaryIndexUpdates=[
+                        {
+                            "Create": {
+                                "IndexName": index_name,
+                                "KeySchema": [
+                                    {"AttributeName": "Type", "KeyType": "HASH"},
+                                    {"AttributeName": db_attr_name, "KeyType": "RANGE"},
+                                ],
+                                "Projection": {"ProjectionType": "ALL"},
+                            }
+                        }
+                    ],
+                )
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ValidationException":
+                    raise MagicModelError(
+                        f"Failed to create index {index_name}: {e}"
+                    ) from e
+
+        return self
+
     # ==================== CRUD Operations ====================
 
     def create(self, model: T) -> MagicModelOperator:
@@ -147,6 +280,8 @@ class MagicModelOperator:
             MagicModelError: If the model already has an ID or creation fails
             ItemAlreadyExistsError: If an item with the same ID already exists
         """
+        self._auto_ensure_indexes(type(model))
+
         try:
             model._prepare_for_create()
         except ValueError as e:
@@ -183,6 +318,8 @@ class MagicModelOperator:
             ItemNotFoundError: If the item is not found
             MagicModelError: If the find operation fails
         """
+        self._auto_ensure_indexes(model_class)
+
         try:
             type_name = model_class.get_type_name()
             response = self._client.get_item(
@@ -217,6 +354,8 @@ class MagicModelOperator:
         Raises:
             MagicModelError: If the save operation fails
         """
+        self._auto_ensure_indexes(type(model))
+
         try:
             model._prepare_for_save()
             item = self._serializer.serialize(model)
@@ -381,6 +520,8 @@ class MagicModelOperator:
         Raises:
             MagicModelError: If the query fails
         """
+        self._auto_ensure_indexes(model_class)
+
         try:
             type_name = model_class.get_type_name()
 
@@ -430,6 +571,8 @@ class MagicModelOperator:
         Returns:
             QueryBuilder for further chaining or execution
         """
+        self._auto_ensure_indexes(model_class)
+
         builder: QueryBuilder[T] = QueryBuilder(
             operator=self,
             model_class=model_class,
