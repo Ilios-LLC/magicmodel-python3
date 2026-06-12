@@ -10,6 +10,8 @@ A Python DynamoDB ORM inspired by [magicmodel-go](https://github.com/Ilios-LLC/m
 - **Fluent API** with method chaining
 - **Soft delete** support with automatic query filtering
 - **WhereV4 query semantics**: OR (list values) and AND (chained calls)
+- **Comparison operators**: `>=`, `<=`, `>`, `<`, `between`, `!=`, `begins_with`
+- **Global Secondary Indexes (GSIs)**: opt-in per field with `__indexed__`, auto-created on first use
 - **Table auto-creation** on first use
 
 ## Installation
@@ -78,6 +80,88 @@ assert dog.is_deleted  # True
 # Hard delete
 mm.delete(dog)
 ```
+
+## Comparison Operators
+
+Query with `>=`, `<=`, `>`, `<`, `between`, `!=`, and `begins_with`:
+
+```python
+from datetime import datetime, timezone
+
+class Transaction(MagicModel):
+    account_id: str
+    transaction_date: datetime
+    amount: float
+    description: str = ""
+
+# Greater than or equal
+results = mm.where(Transaction, "amount", ">=", 100.0).execute()
+
+# Less than
+results = mm.where(Transaction, "transaction_date", "<", cutoff_date).execute()
+
+# Between (inclusive)
+results = mm.where(
+    Transaction, "transaction_date", "between", [start_date, end_date]
+).execute()
+
+# Not equal
+results = mm.where(Transaction, "amount", "!=", 0).execute()
+
+# Begins with (string prefix)
+results = mm.where(Transaction, "description", "begins_with", "refund-").execute()
+
+# Combine comparison operators with chaining
+results = (
+    mm.where(Transaction, "transaction_date", ">=", start_date, chain=True)
+      .where("transaction_date", "<=", end_date)
+      .execute()
+)
+
+# Mix comparisons with equality filters
+results = (
+    mm.where(Transaction, "amount", ">=", 500.0, chain=True)
+      .where("account_id", "acct-123")
+      .execute()
+)
+```
+
+## Indexed Fields (GSIs)
+
+For large datasets, comparison queries can be slow because DynamoDB reads all items of a type before filtering. Add `__indexed__` to create a Global Secondary Index for efficient range queries:
+
+```python
+class Transaction(MagicModel):
+    __indexed__ = ["transaction_date"]  # add this line — that's it
+
+    account_id: str
+    transaction_date: datetime
+    amount: float
+```
+
+The GSI is created automatically on first use (no setup code needed). Query code stays exactly the same — the query builder detects the index and routes the condition to `KeyConditionExpression` instead of `FilterExpression`, so DynamoDB only reads matching items.
+
+```python
+# Without __indexed__: reads ALL transactions, filters server-side
+# With __indexed__: reads ONLY transactions in the date range
+results = mm.where(
+    Transaction, "transaction_date", "between", [start, end]
+).execute()
+```
+
+You can index multiple fields:
+
+```python
+class Transaction(MagicModel):
+    __indexed__ = ["transaction_date", "category"]
+
+    account_id: str
+    transaction_date: datetime
+    category: str
+    amount: float
+```
+
+**When to add `__indexed__`:** Start without it. If a query gets slow (typically 10k+ items of the same type), add the field to `__indexed__`. No code changes needed — just the model declaration.
 
 ## Using with LocalStack
 
