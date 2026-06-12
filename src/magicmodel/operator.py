@@ -409,22 +409,23 @@ class MagicModelOperator:
         self,
         model_class: type[T],
         field_name: str,
-        field_value: Any | Sequence[Any],
+        *args: Any,
         chain: bool = False,
     ) -> QueryBuilder[T]:
         """
-        Start or continue a where query (WhereV4 semantics).
+        Start a where query.
 
         Supports:
-        - Single values for equality
-        - Lists/sequences for OR conditions
-        - Chaining for AND conditions
+        - Equality: where(Dog, "breed", "Labrador")
+        - OR: where(Dog, "breed", ["Labrador", "Dalmatian"])
+        - Comparison: where(Dog, "age", ">=", 3)
+        - Between: where(Dog, "age", "between", [1, 5])
 
         Args:
             model_class: The model class to query
             field_name: The field to filter on
-            field_value: Single value or list of values
-            chain: If True, continue chaining; if False, this is the final condition
+            *args: (value,) for equality or (operator, value) for comparisons
+            chain: If True, continue chaining
 
         Returns:
             QueryBuilder for further chaining or execution
@@ -433,4 +434,4 @@ class MagicModelOperator:
             operator=self,
             model_class=model_class,
         )
-        return builder.where(field_name, field_value, chain=chain)
+        return builder.where(field_name, *args, chain=chain)

@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 T = TypeVar("T", bound=MagicModel)
 
+VALID_OPERATORS = frozenset({"=", "!=", "<>", ">", ">=", "<", "<=", "between", "begins_with"})
+
 
 @dataclass
 class WhereCondition:
@@ -22,6 +24,7 @@ class WhereCondition:
 
     field_name: str
     field_values: list[Any] = field(default_factory=list)
+    operator: str = "="
 
 
 class QueryBuilder(Generic[T]):
@@ -53,22 +56,30 @@ class QueryBuilder(Generic[T]):
     def where(
         self,
         field_name: str,
-        field_value: Any | Sequence[Any],
+        *args: Any,
         chain: bool = False,
     ) -> QueryBuilder[T]:
-        """
-        Add a where condition.
+        from .exceptions import ValidationError
 
-        Args:
-            field_name: The field to filter on
-            field_value: Single value or list of values (list = OR)
-            chain: If True, more conditions follow; if False, ready to execute
+        if len(args) == 1:
+            op = "="
+            field_value = args[0]
+        elif len(args) == 2:
+            op = args[0]
+            field_value = args[1]
+        else:
+            raise ValidationError("where() takes (field, value) or (field, operator, value)")
 
-        Returns:
-            Self for method chaining
-        """
-        # Normalize to list
-        if isinstance(field_value, (list, tuple, set)) and not isinstance(field_value, str):
+        if op not in VALID_OPERATORS:
+            raise ValidationError(f"Unsupported operator: {op!r}")
+
+        if op == "between":
+            if not isinstance(field_value, (list, tuple)) or len(field_value) != 2:
+                raise ValidationError("between operator requires two values: [start, end]")
+            values = list(field_value)
+        elif op == "=" and isinstance(field_value, (list, tuple, set)) and not isinstance(
+            field_value, str
+        ):
             values = list(field_value)
         else:
             values = [field_value]
@@ -77,6 +88,7 @@ class QueryBuilder(Generic[T]):
             WhereCondition(
                 field_name=field_name,
                 field_values=values,
+                operator=op,
             )
         )
 
@@ -167,7 +179,6 @@ class QueryBuilder(Generic[T]):
             # Handle dot notation for nested fields
             field_parts = condition.field_name.split(".")
             if len(field_parts) > 1:
-                # Nested field: "observability.provider" -> "#f0_0.#f0_1"
                 path_aliases = []
                 for j, part in enumerate(field_parts):
                     alias = f"#f{i}_{j}"
@@ -176,29 +187,53 @@ class QueryBuilder(Generic[T]):
                     path_aliases.append(alias)
                 field_path = ".".join(path_aliases)
             else:
-                # Simple field - resolve alias to match model_dump(by_alias=True)
                 field_alias = f"#f{i}"
-                db_name = self._resolve_db_field_name(condition.field_name, 0, [condition.field_name])
+                db_name = self._resolve_db_field_name(
+                    condition.field_name, 0, [condition.field_name]
+                )
                 attr_names[field_alias] = db_name
                 field_path = field_alias
 
-            if len(condition.field_values) == 1:
-                # Single value - equality
-                value_alias = f":v{i}"
-                attr_values[value_alias] = self._operator._serializer.serialize_value(
-                    condition.field_values[0]
-                )
-                filter_parts.append(f"{field_path} = {value_alias}")
-            else:
-                # Multiple values - IN operator
+            op = condition.operator
+
+            if op == "=" and len(condition.field_values) > 1:
+                # Multiple values — IN operator (existing behavior)
                 value_aliases = []
                 for j, val in enumerate(condition.field_values):
                     value_alias = f":v{i}_{j}"
                     attr_values[value_alias] = self._operator._serializer.serialize_value(val)
                     value_aliases.append(value_alias)
-
                 in_clause = ", ".join(value_aliases)
                 filter_parts.append(f"{field_path} IN ({in_clause})")
+            elif op == "between":
+                start_alias = f":v{i}_start"
+                end_alias = f":v{i}_end"
+                attr_values[start_alias] = self._operator._serializer.serialize_value(
+                    condition.field_values[0]
+                )
+                attr_values[end_alias] = self._operator._serializer.serialize_value(
+                    condition.field_values[1]
+                )
+                filter_parts.append(f"{field_path} BETWEEN {start_alias} AND {end_alias}")
+            elif op == "begins_with":
+                value_alias = f":v{i}"
+                attr_values[value_alias] = self._operator._serializer.serialize_value(
+                    condition.field_values[0]
+                )
+                filter_parts.append(f"begins_with({field_path}, {value_alias})")
+            elif op in ("!=", "<>"):
+                value_alias = f":v{i}"
+                attr_values[value_alias] = self._operator._serializer.serialize_value(
+                    condition.field_values[0]
+                )
+                filter_parts.append(f"{field_path} <> {value_alias}")
+            else:
+                # =, >, >=, <, <=
+                value_alias = f":v{i}"
+                attr_values[value_alias] = self._operator._serializer.serialize_value(
+                    condition.field_values[0]
+                )
+                filter_parts.append(f"{field_path} {op} {value_alias}")
 
         # Combine filter expressions with AND
         filter_expression = " AND ".join(filter_parts)
