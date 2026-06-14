@@ -1,6 +1,6 @@
 [project]
 name = "magicmodel"
-version = "0.2.0"
+version = "0.2.1"
 description = "Python DynamoDB ORM inspired by magicmodel-go"
 readme = "README.md"
 requires-python = ">=3.10"
