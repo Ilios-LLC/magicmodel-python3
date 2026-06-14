@@ -68,9 +68,10 @@ def operator(dynamodb_endpoint):
 def clean_operator(operator):
     """Operator with cleanup after each test."""
     yield operator
-    # Clean up all dogs and cats after the test
+    # Clean up all test models after the test
     _cleanup_items(operator, Dog)
     _cleanup_items(operator, Cat)
+    _cleanup_by_type(operator, "event_log")
 
 
 def _cleanup_items(operator: MagicModelOperator, model_class: type[MagicModel]) -> None:
@@ -95,6 +96,24 @@ def _cleanup_items(operator: MagicModelOperator, model_class: type[MagicModel]) 
             )
     except Exception:
         pass  # Ignore cleanup errors
+
+
+def _cleanup_by_type(operator: MagicModelOperator, type_name: str) -> None:
+    """Delete all items of a given type name string."""
+    try:
+        response = operator._client.query(
+            TableName=operator._table_name,
+            KeyConditionExpression="#type = :type",
+            ExpressionAttributeNames={"#type": "Type"},
+            ExpressionAttributeValues={":type": {"S": type_name}},
+        )
+        for item in response.get("Items", []):
+            operator._client.delete_item(
+                TableName=operator._table_name,
+                Key={"Type": item["Type"], "ID": item["ID"]},
+            )
+    except Exception:
+        pass
 
 
 @pytest.fixture

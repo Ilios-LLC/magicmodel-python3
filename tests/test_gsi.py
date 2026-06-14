@@ -17,6 +17,13 @@ class IndexedTransaction(MagicModel):
     description: str = ""
 
 
+class NullableIndexedModel(MagicModel):
+    __indexed__: ClassVar[list[str]] = ["recurring_id"]
+
+    name: str
+    recurring_id: str | None = None
+
+
 class UnindexedTransaction(MagicModel):
     """Same fields, no index — for comparison."""
 
@@ -51,6 +58,7 @@ def clean_gsi_operator(gsi_operator):
     _cleanup(gsi_operator, IndexedTransaction)
     _cleanup(gsi_operator, UnindexedTransaction)
     _cleanup(gsi_operator, MultiIndexModel)
+    _cleanup(gsi_operator, NullableIndexedModel)
 
 
 def _cleanup(operator, model_class):
@@ -194,5 +202,43 @@ class TestGSIQueryRouting:
 
         results = clean_gsi_operator.where(
             UnindexedTransaction, "amount", ">=", 200.0
+        ).execute()
+        assert len(results) == 2
+
+
+class TestNullableIndexedFields:
+    def test_create_with_none_indexed_field(self, clean_gsi_operator):
+        """Nullable indexed field set to None should not cause GSI errors."""
+        item = NullableIndexedModel(name="no-recurrence")
+        clean_gsi_operator.create(item)
+
+        found = clean_gsi_operator.find(NullableIndexedModel, item.id)
+        assert found.name == "no-recurrence"
+        assert found.recurring_id is None
+
+    def test_create_with_set_indexed_field(self, clean_gsi_operator):
+        """Nullable indexed field with a value should work and be queryable."""
+        item = NullableIndexedModel(name="has-recurrence", recurring_id="rec-123")
+        clean_gsi_operator.create(item)
+
+        results = clean_gsi_operator.where(
+            NullableIndexedModel, "recurring_id", "rec-123"
+        ).execute()
+        assert len(results) == 1
+        assert results[0].recurring_id == "rec-123"
+
+    def test_mix_none_and_set_indexed_field(self, clean_gsi_operator):
+        """Items with and without indexed field values coexist correctly."""
+        clean_gsi_operator.create(NullableIndexedModel(name="a"))
+        clean_gsi_operator.create(NullableIndexedModel(name="b", recurring_id="rec-1"))
+        clean_gsi_operator.create(NullableIndexedModel(name="c", recurring_id="rec-2"))
+
+        # All 3 should be findable
+        all_items = clean_gsi_operator.all(NullableIndexedModel)
+        assert len(all_items) == 3
+
+        # Only the 2 with recurring_id set should be in the GSI
+        results = clean_gsi_operator.where(
+            NullableIndexedModel, "recurring_id", ">=", "rec-"
         ).execute()
         assert len(results) == 2

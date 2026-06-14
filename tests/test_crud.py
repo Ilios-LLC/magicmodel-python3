@@ -2,9 +2,16 @@
 
 import pytest
 
-from magicmodel import ItemNotFoundError, MagicModelError
+from magicmodel import ItemNotFoundError, MagicModelError, MagicModel
 
 from .conftest import Dog
+
+
+class EventLog(MagicModel):
+    """Model with a string field that looks like a date."""
+
+    event_name: str
+    date_label: str  # intentionally str, not datetime
 
 
 class TestCreate:
@@ -211,3 +218,25 @@ class TestMethodChaining:
 
         # Update should not have been applied
         assert dog.name != "Should not update"
+
+
+class TestStringDateRoundTrip:
+    """Regression: deserializer must not coerce date-like strings to datetime."""
+
+    def test_date_string_stays_string(self, clean_operator):
+        """A str field containing '2024-06-15' should round-trip as str, not datetime."""
+        event = EventLog(event_name="launch", date_label="2024-06-15")
+        clean_operator.create(event)
+
+        found = clean_operator.find(EventLog, event.id)
+        assert found.date_label == "2024-06-15"
+        assert isinstance(found.date_label, str)
+
+    def test_iso_datetime_string_stays_string(self, clean_operator):
+        """A str field containing a full ISO datetime should also stay str."""
+        event = EventLog(event_name="deploy", date_label="2024-06-15T10:30:00+00:00")
+        clean_operator.create(event)
+
+        found = clean_operator.find(EventLog, event.id)
+        assert found.date_label == "2024-06-15T10:30:00+00:00"
+        assert isinstance(found.date_label, str)
