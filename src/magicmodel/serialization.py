@@ -155,12 +155,7 @@ class Deserializer:
         elif "BOOL" in attr_value:
             return attr_value["BOOL"]
         elif "S" in attr_value:
-            # Try to parse as datetime
-            s_value = attr_value["S"]
-            try:
-                return datetime.fromisoformat(s_value)
-            except ValueError:
-                return s_value
+            return attr_value["S"]
         elif "N" in attr_value:
             n_value = attr_value["N"]
             if "." in n_value:
