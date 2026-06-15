@@ -33,6 +33,15 @@ class UnindexedTransaction(MagicModel):
     description: str = ""
 
 
+class CrossModelCollider(MagicModel):
+    """Model WITHOUT __indexed__ but with a field name that collides with
+    IndexedTransaction's GSI (transaction_date). Tests that None values
+    don't cause GSI errors even when another model's GSI exists on the table."""
+
+    label: str
+    transaction_date: datetime | None = None
+
+
 class MultiIndexModel(MagicModel):
     __indexed__: ClassVar[list[str]] = ["created_date", "category"]
 
@@ -59,6 +68,7 @@ def clean_gsi_operator(gsi_operator):
     _cleanup(gsi_operator, UnindexedTransaction)
     _cleanup(gsi_operator, MultiIndexModel)
     _cleanup(gsi_operator, NullableIndexedModel)
+    _cleanup(gsi_operator, CrossModelCollider)
 
 
 def _cleanup(operator, model_class):
@@ -242,3 +252,36 @@ class TestNullableIndexedFields:
             NullableIndexedModel, "recurring_id", ">=", "rec-"
         ).execute()
         assert len(results) == 2
+
+
+class TestCrossModelGSICollision:
+    """Regression: GSIs are table-level. A model WITHOUT __indexed__ that has a
+    field name matching another model's GSI must not write NULL for that field,
+    or DynamoDB rejects the PutItem."""
+
+    def test_create_model_with_none_colliding_field(self, clean_gsi_operator):
+        """Creating a model where a None field collides with another model's GSI."""
+        # First, ensure the GSI exists (created by IndexedTransaction)
+        _seed_indexed_transactions(clean_gsi_operator)
+
+        # Now create a CrossModelCollider with transaction_date=None.
+        # The gsi_transaction_date GSI exists on the table — if we write
+        # {"NULL": True} for transaction_date, DynamoDB rejects it.
+        item = CrossModelCollider(label="no-date")
+        clean_gsi_operator.create(item)
+
+        found = clean_gsi_operator.find(CrossModelCollider, item.id)
+        assert found.label == "no-date"
+        assert found.transaction_date is None
+
+    def test_create_model_with_set_colliding_field(self, clean_gsi_operator):
+        """Model with the colliding field set should also work fine."""
+        _seed_indexed_transactions(clean_gsi_operator)
+
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        item = CrossModelCollider(label="has-date", transaction_date=now)
+        clean_gsi_operator.create(item)
+
+        found = clean_gsi_operator.find(CrossModelCollider, item.id)
+        assert found.label == "has-date"
+        assert found.transaction_date == now

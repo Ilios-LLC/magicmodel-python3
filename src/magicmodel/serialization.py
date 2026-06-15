@@ -27,39 +27,17 @@ class Serializer:
         """
         try:
             data = model.model_dump(by_alias=True)
-            skip = self._indexed_attr_names(model)
+            # Omit None values entirely. DynamoDB treats missing attributes as
+            # null, and GSI sort keys only accept scalar types (S, N, B) — not
+            # NULL. Since GSIs are table-level, a None field on ANY model type
+            # will conflict with a GSI created by another model in the same table.
             return {
                 k: self.serialize_value(v)
                 for k, v in data.items()
-                if not (v is None and k in skip)
+                if v is not None
             }
         except Exception as e:
             raise SerializationError(f"Failed to serialize model: {e}") from e
-
-    @staticmethod
-    def _indexed_attr_names(model: BaseModel) -> frozenset[str]:
-        """Return DynamoDB attribute names for __indexed__ fields.
-
-        None values on GSI sort key attributes must be omitted entirely —
-        DynamoDB GSI keys only accept scalar types (S, N, B), not NULL.
-        """
-        indexed = getattr(model, "__indexed__", None)
-        if not indexed:
-            return frozenset()
-        names: set[str] = set()
-        model_cls = type(model)
-        alias_gen = model_cls.model_config.get("alias_generator")
-        for field_name in indexed:
-            fi = model_cls.model_fields.get(field_name)
-            if fi and fi.serialization_alias:
-                names.add(fi.serialization_alias)
-            elif fi and fi.alias:
-                names.add(fi.alias)
-            elif alias_gen and callable(alias_gen):
-                names.add(alias_gen(field_name))
-            else:
-                names.add(field_name)
-        return frozenset(names)
 
     def serialize_value(self, value: Any) -> dict[str, Any]:
         """
