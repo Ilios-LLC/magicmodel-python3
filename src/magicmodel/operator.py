@@ -396,13 +396,14 @@ class MagicModelOperator:
             now = datetime.now(tz=timezone.utc)
             updates["updated_at"] = now
 
+            remove_parts: list[str] = []
+
             for field_name, value in updates.items():
                 # Update the local model
                 setattr(model, field_name, value)
 
                 # Build expression parts
                 attr_name = f"#{field_name}"
-                attr_value = f":{field_name}"
 
                 # Resolve to DynamoDB attribute name (matching model_dump(by_alias=True))
                 field_info = type(model).model_fields.get(field_name)
@@ -418,10 +419,22 @@ class MagicModelOperator:
                             db_field_name = alias_generator(field_name)
 
                 attr_names[attr_name] = db_field_name
-                attr_values[attr_value] = self._serializer.serialize_value(value)
-                set_parts.append(f"{attr_name} = {attr_value}")
 
-            update_expression = "SET " + ", ".join(set_parts)
+                if value is None:
+                    # Remove attribute — DynamoDB treats missing as null,
+                    # and NULL type conflicts with GSI sort keys.
+                    remove_parts.append(attr_name)
+                else:
+                    attr_value = f":{field_name}"
+                    attr_values[attr_value] = self._serializer.serialize_value(value)
+                    set_parts.append(f"{attr_name} = {attr_value}")
+
+            parts = []
+            if set_parts:
+                parts.append("SET " + ", ".join(set_parts))
+            if remove_parts:
+                parts.append("REMOVE " + ", ".join(remove_parts))
+            update_expression = " ".join(parts)
 
             self._client.update_item(
                 TableName=self._table_name,

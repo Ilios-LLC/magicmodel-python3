@@ -170,6 +170,30 @@ class TestUpdate:
 
         assert dog.updated_at > original_updated_at
 
+    def test_update_field_to_none_removes_attribute(self, clean_operator):
+        """Updating an Optional field to None should remove the attribute, not write NULL."""
+        from magicmodel import MagicModel
+
+        class Task(MagicModel):
+            title: str
+            assignee: str | None = None
+
+        event = Task(title="do thing", assignee="alice")
+        clean_operator.create(event)
+
+        clean_operator.update(event, assignee=None)
+        assert event.assignee is None
+
+        found = clean_operator.find(Task, event.id)
+        assert found.assignee is None
+
+        # Verify the attribute was actually removed (not set to NULL)
+        raw = clean_operator._client.get_item(
+            TableName=clean_operator._table_name,
+            Key={"Type": {"S": "task"}, "ID": {"S": event.id}},
+        )
+        assert "assignee" not in raw["Item"]
+
 
 class TestDelete:
     """Tests for hard delete operation."""
