@@ -525,23 +525,32 @@ class MagicModelOperator:
         try:
             type_name = model_class.get_type_name()
 
-            response = self._client.query(
-                TableName=self._table_name,
-                KeyConditionExpression="#type = :type",
-                FilterExpression="attribute_not_exists(#deleted) OR #deleted = :null",
-                ExpressionAttributeNames={
+            query_kwargs: dict[str, Any] = {
+                "TableName": self._table_name,
+                "KeyConditionExpression": "#type = :type",
+                "FilterExpression": "attribute_not_exists(#deleted) OR #deleted = :null",
+                "ExpressionAttributeNames": {
                     "#type": "Type",
                     "#deleted": "DeletedAt",
                 },
-                ExpressionAttributeValues={
+                "ExpressionAttributeValues": {
                     ":type": {"S": type_name},
                     ":null": {"NULL": True},
                 },
-            )
+            }
+
+            items: list[dict[str, Any]] = []
+            while True:
+                response = self._client.query(**query_kwargs)
+                items.extend(response.get("Items", []))
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                query_kwargs["ExclusiveStartKey"] = last_key
 
             return [
                 self._deserializer.deserialize(item, model_class)
-                for item in response.get("Items", [])
+                for item in items
             ]
         except Exception as e:
             raise MagicModelError(f"All query failed: {e}") from e

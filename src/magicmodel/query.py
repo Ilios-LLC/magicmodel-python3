@@ -300,9 +300,16 @@ class QueryBuilder(Generic[T]):
         if filter_parts:
             query_kwargs["FilterExpression"] = " AND ".join(filter_parts)
 
-        response = self._operator._client.query(**query_kwargs)
+        items: list[dict[str, Any]] = []
+        while True:
+            response = self._operator._client.query(**query_kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query_kwargs["ExclusiveStartKey"] = last_key
 
         return [
             self._operator._deserializer.deserialize(item, self._model_class)
-            for item in response.get("Items", [])
+            for item in items
         ]

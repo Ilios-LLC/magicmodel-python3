@@ -1,5 +1,7 @@
 """Integration tests for query operations (WhereV4 semantics)."""
 
+from unittest.mock import patch
+
 from .conftest import Cat, Dog
 
 
@@ -263,3 +265,59 @@ class TestQueryEdgeCases:
         older = clean_operator.where(Dog, "age", 5).execute()
         assert len(older) == 1
         assert older[0].name == "Max"
+
+
+class TestPagination:
+    """Tests for query pagination (LastEvaluatedKey handling)."""
+
+    def test_all_paginates(self, clean_operator, dog_factory):
+        """all() should return all items even when DynamoDB paginates."""
+        for i in range(10):
+            clean_operator.create(dog_factory(name=f"Dog{i}"))
+
+        # Wrap the real client.query to inject Limit=2, forcing 5 pages
+        real_query = clean_operator._client.query
+
+        def paginated_query(**kwargs):
+            kwargs["Limit"] = 2
+            return real_query(**kwargs)
+
+        with patch.object(clean_operator._client, "query", side_effect=paginated_query):
+            results = clean_operator.all(Dog)
+
+        assert len(results) == 10
+        names = {d.name for d in results}
+        assert names == {f"Dog{i}" for i in range(10)}
+
+    def test_where_paginates(self, clean_operator, dog_factory):
+        """where().execute() should return all items even when DynamoDB paginates."""
+        for i in range(10):
+            clean_operator.create(dog_factory(name=f"Dog{i}", breed="Labrador"))
+
+        real_query = clean_operator._client.query
+
+        def paginated_query(**kwargs):
+            kwargs["Limit"] = 2
+            return real_query(**kwargs)
+
+        with patch.object(clean_operator._client, "query", side_effect=paginated_query):
+            results = clean_operator.where(Dog, "breed", "Labrador").execute()
+
+        assert len(results) == 10
+
+    def test_where_paginates_with_filter(self, clean_operator, dog_factory):
+        """Pagination works correctly when FilterExpression removes items from pages."""
+        for i in range(10):
+            breed = "Labrador" if i % 2 == 0 else "Poodle"
+            clean_operator.create(dog_factory(name=f"Dog{i}", breed=breed))
+
+        real_query = clean_operator._client.query
+
+        def paginated_query(**kwargs):
+            kwargs["Limit"] = 3
+            return real_query(**kwargs)
+
+        with patch.object(clean_operator._client, "query", side_effect=paginated_query):
+            results = clean_operator.where(Dog, "breed", "Labrador").execute()
+
+        assert len(results) == 5
